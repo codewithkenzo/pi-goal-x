@@ -7,3 +7,4 @@
 - 2026-05-24: Tightened `clearGoalTurnRuntimeState()` further so stop/clear/replace/focus-loss paths clear continuation timer/queue, accounting, runningGoalId, and checkpoint-owned turn state together.
 - 2026-05-24: Expanded stale checkpoint guard to cover full goal work-tool set (including non-progress tools like `goal_question`) while still allowing `get_goal`; added unfocus regression coverage.
 - 2026-05-24: Verification green: `npm test`, `npm run check`.
+- 2026-05-24: Real local Pi stress QA passed using patched extension via `pi --offline --no-extensions -e /home/kenzo/dev/pi-goal-x/extensions/goal.ts` in isolated `/tmp/pi-goal-x-stress.jvkFkD`: created dummy Sisyphus goal, paused it, cleared/replaced goals, injected stale checkpoint prompts that explicitly requested `bash`/`goal_question` work, and observed `This queued checkpoint is no longer active.` with no `BAD_STALE_TOOL_RAN` or `BAD_PAUSED_TOOL_RAN` markers in stress artifacts.
