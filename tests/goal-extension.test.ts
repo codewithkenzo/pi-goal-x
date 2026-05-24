@@ -344,6 +344,16 @@ for (const scenario of ["pause", "clear", "replace"] as const) {
 			assert.match(blockedQuestion?.reason ?? "", /goal was already stopped earlier in this turn/);
 			assert.match(blockedQuestion?.reason ?? "", new RegExp(`goalId=${goal.id}`));
 
+			const blockedSubagent = await emit(harness, "tool_call", { toolName: "subagent", args: { task: "delegate stale work" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+			assert.equal(blockedSubagent?.block, true);
+			assert.match(blockedSubagent?.reason ?? "", /goal was already stopped earlier in this turn/);
+			assert.match(blockedSubagent?.reason ?? "", new RegExp(`goalId=${goal.id}`));
+
+			const blockedUnknown = await emit(harness, "tool_call", { toolName: "unknown_extension_tool", args: { payload: "delegate stale work" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+			assert.equal(blockedUnknown?.block, true);
+			assert.match(blockedUnknown?.reason ?? "", /goal was already stopped earlier in this turn/);
+			assert.match(blockedUnknown?.reason ?? "", new RegExp(`goalId=${goal.id}`));
+
 			const allowedGetGoal = await emit(harness, "tool_call", { toolName: "get_goal", args: {} }, harness.ctx) as { block?: boolean } | undefined;
 			assert.equal(allowedGetGoal, undefined);
 

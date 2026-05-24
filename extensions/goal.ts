@@ -37,7 +37,6 @@ import {
 	QUESTION_TOOL_NAME,
 	SISYPHUS_STEP_TOOL_NAME,
 	GOAL_PROGRESS_TOOL_NAMES,
-	GOAL_WORK_TOOL_NAMES,
 	lifecycleToolNamesForGoalStatus,
 	TWEAK_APPLY_TOOL_NAME,
 } from "./goal-tool-names.ts";
@@ -132,7 +131,6 @@ const GOAL_PROGRESS_TOOL_SET = new Set<string>(GOAL_PROGRESS_TOOL_NAMES);
  * yield the turn; we block all subsequent tool calls except these read-only inspections.
  */
 const POST_STOP_ALLOWED_TOOL_SET = new Set<string>(POST_STOP_ALLOWED_TOOLS);
-const STALE_CHECKPOINT_BLOCKED_TOOL_SET = new Set<string>(GOAL_WORK_TOOL_NAMES.filter((name) => !POST_STOP_ALLOWED_TOOL_SET.has(name)));
 
 /**
  * When non-null, /goal-tweak drafting is in progress for this goal id and the
@@ -543,7 +541,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	}
 
 	function isStaleCheckpointBlockedToolCall(toolName: string): boolean {
-		return STALE_CHECKPOINT_BLOCKED_TOOL_SET.has(toolName);
+		return !POST_STOP_ALLOWED_TOOL_SET.has(toolName);
 	}
 
 	const activeGetGoalTurnsByGoalId = new Map<string, number>();
