@@ -2,3 +2,8 @@
 - 2026-05-24: Added checkpoint-actionability guard in `extensions/goal.ts` so queued continuations only stay live when current goal is still current, active, and autoContinue; stale checkpoint turns now abort before work and block work tools mid-turn after pause/clear/replace.
 - 2026-05-24: Added regression coverage for active auto-continue, paused/cleared/replaced stale checkpoints, and mid-turn work-tool blocking after stop/replacement. Installed deps with `npm install` to run checks.
 - 2026-05-24: Verification green: `npm test` pass, `npm run check` pass.
+- 2026-05-24: Tightened lifecycle cleanup with `clearGoalTurnRuntimeState()` so stop/clear/replace/focus changes clear continuation, accounting, and running-goal runtime state consistently.
+- 2026-05-24: Broadened stale-checkpoint guard to block non-read-only goal work tools (for example `goal_question`) in addition to progress tools, preventing mid-turn recovery work after stop/replacement.
+- 2026-05-24: Tightened `clearGoalTurnRuntimeState()` further so stop/clear/replace/focus-loss paths clear continuation timer/queue, accounting, runningGoalId, and checkpoint-owned turn state together.
+- 2026-05-24: Expanded stale checkpoint guard to cover full goal work-tool set (including non-progress tools like `goal_question`) while still allowing `get_goal`; added unfocus regression coverage.
+- 2026-05-24: Verification green: `npm test`, `npm run check`.

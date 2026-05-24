@@ -37,6 +37,7 @@ import {
 	QUESTION_TOOL_NAME,
 	SISYPHUS_STEP_TOOL_NAME,
 	GOAL_PROGRESS_TOOL_NAMES,
+	GOAL_WORK_TOOL_NAMES,
 	lifecycleToolNamesForGoalStatus,
 	TWEAK_APPLY_TOOL_NAME,
 } from "./goal-tool-names.ts";
@@ -131,6 +132,7 @@ const GOAL_PROGRESS_TOOL_SET = new Set<string>(GOAL_PROGRESS_TOOL_NAMES);
  * yield the turn; we block all subsequent tool calls except these read-only inspections.
  */
 const POST_STOP_ALLOWED_TOOL_SET = new Set<string>(POST_STOP_ALLOWED_TOOLS);
+const STALE_CHECKPOINT_BLOCKED_TOOL_SET = new Set<string>(GOAL_WORK_TOOL_NAMES.filter((name) => !POST_STOP_ALLOWED_TOOL_SET.has(name)));
 
 /**
  * When non-null, /goal-tweak drafting is in progress for this goal id and the
@@ -528,13 +530,20 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		accounting.lastAccountedAt = null;
 	}
 
-	function clearStoppedRuntimeState(): void {
+	function clearGoalTurnRuntimeState(): void {
+		turnStoppedFor = turnStoppedFor ?? checkpointGoalId ?? runningGoalId ?? null;
 		clearContinuationState();
 		clearActiveAccounting();
+		runningGoalId = null;
+		checkpointGoalId = null;
 	}
 
 	function isActionableContinuationGoal(goalId: string | null | undefined): goalId is string {
 		return !!goalId && state.goal?.id === goalId && state.goal.status === "active" && state.goal.autoContinue;
+	}
+
+	function isStaleCheckpointBlockedToolCall(toolName: string): boolean {
+		return STALE_CHECKPOINT_BLOCKED_TOOL_SET.has(toolName);
 	}
 
 	const activeGetGoalTurnsByGoalId = new Map<string, number>();
@@ -566,7 +575,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			}
 			goalsById = fresh;
 			focusedGoalId = null;
-			clearStoppedRuntimeState();
+			clearGoalTurnRuntimeState();
 			if (current) resetGetGoalNudgeState(current.id);
 			if (tweakDraftingFor !== null) tweakDraftingFor = null;
 			syncGoalTools();
@@ -579,8 +588,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		goalsById = fresh;
 		goalsById.set(reconciled.id, reconciled);
 		focusedGoalId = reconciled.id;
-		if (reconciled.status !== "active" || !reconciled.autoContinue) clearContinuationState();
-		if (reconciled.status !== "active") clearActiveAccounting();
+		if (reconciled.status !== "active") clearGoalTurnRuntimeState();
+		else if (!reconciled.autoContinue) clearContinuationState();
 		return true;
 	}
 
@@ -592,8 +601,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const previousGoalId = focusedGoalId;
 		focusedGoalId = goalId && goalsById.has(goalId) ? goalId : null;
 		if (previousGoalId !== focusedGoalId) {
-			clearContinuationState();
-			clearActiveAccounting();
+			clearGoalTurnRuntimeState();
 			resetGetGoalNudgeState(previousGoalId);
 			resetGetGoalNudgeState(focusedGoalId);
 			if (tweakDraftingFor !== null && tweakDraftingFor !== focusedGoalId) tweakDraftingFor = null;
@@ -618,6 +626,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		goalsById.set(next.id, next);
 		focusedGoalId = next.id;
 		if (previousGoalId !== focusedGoalId) {
+			clearGoalTurnRuntimeState();
 			resetGetGoalNudgeState(previousGoalId);
 			resetGetGoalNudgeState(focusedGoalId);
 		}
@@ -635,7 +644,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const previousGoalId = focusedGoalId;
 		if (focusedGoalId) goalsById.delete(focusedGoalId);
 		focusedGoalId = null;
-		clearStoppedRuntimeState();
+		clearGoalTurnRuntimeState();
 		resetGetGoalNudgeState(previousGoalId);
 		appendFocusEntry(null, reason);
 		syncGoalTools();
@@ -852,8 +861,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				goalsById.delete(id);
 			}
 		}
-		clearStoppedRuntimeState();
-		runningGoalId = null;
+		clearGoalTurnRuntimeState();
 		syncGoalTools();
 		updateUI(ctx);
 	}
@@ -862,19 +870,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const previousGoalId = state.goal?.id ?? null;
 		state.goal = next;
 		const focusChanged = previousGoalId !== focusedGoalId;
+		clearGoalTurnRuntimeState();
 		if (focusChanged) {
-			clearContinuationState();
-			clearActiveAccounting();
 			resetGetGoalNudgeState(previousGoalId);
 			resetGetGoalNudgeState(focusedGoalId);
 		}
 		if (focusReason && focusChanged) appendFocusEntry(focusedGoalId, focusReason);
-		if (!state.goal || (state.goal.status !== "active") || !state.goal.autoContinue) {
-			clearContinuationState();
-		}
-		if (!state.goal || state.goal.status === "paused" || state.goal.status === "complete") {
-			clearActiveAccounting();
-		}
 		if (!state.goal || state.goal.id !== previousGoalId) {
 			// Drop any stale tweak-edit-gate that didn't belong to this goal.
 			if (tweakDraftingFor !== null && tweakDraftingFor !== state.goal?.id) tweakDraftingFor = null;
@@ -948,7 +949,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		continuationTimer = null;
 		continuationScheduledFor = null;
 		syncGoalTools();
-		if (!goal || !isActionableContinuationGoal(goalId)) {
+		if (!goal) {
+			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
+			return;
+		}
+		if (goal.id !== goalId || goal.status !== "active" || !goal.autoContinue) {
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			return;
 		}
@@ -967,17 +972,18 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			continuationTimer.unref?.();
 			return;
 		}
+		const queuedGoal: GoalRecord = goal;
 		continuationQueuedFor = goalId;
 		pi.sendMessage<GoalEventDetails>(
 			{
 				customType: GOAL_EVENT_ENTRY,
-				content: continuationPrompt(goal),
+				content: continuationPrompt(queuedGoal),
 				display: false,
 				details: {
 					kind: "checkpoint",
-					goalId: goal.id,
-					status: goal.status,
-					objective: goal.objective,
+					goalId: queuedGoal.id,
+					status: queuedGoal.status,
+					objective: queuedGoal.objective,
 					timestamp: Date.now(),
 				},
 			},
@@ -1033,8 +1039,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 	async function startGoalTweakDrafting(hint: string, ctx: ExtensionContext): Promise<void> {
 		reconcileFocusedGoalFromDisk(ctx);
-		clearContinuationState();
-		clearActiveAccounting();
+		clearGoalTurnRuntimeState();
 		if (!state.goal) {
 			if (openGoals().length > 0) {
 				const selected = await chooseOpenGoal(ctx, "Tweak which open goal?");
@@ -1089,8 +1094,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	}
 
 	function startGoalDrafting(topic: string, focus: DraftingFocus, ctx: ExtensionContext): void {
-		clearContinuationState();
-		clearActiveAccounting();
+		clearGoalTurnRuntimeState();
 		const trimmed = topic.trim();
 		const label = focus === "sisyphus" ? "Sisyphus intent discussion" : "Goal intent discussion";
 		const hint = focus === "sisyphus"
@@ -1190,8 +1194,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
-		clearContinuationState();
-		clearActiveAccounting();
+		clearGoalTurnRuntimeState();
 		confirmationIntent = null;
 		syncGoalTools();
 		replaceGoal({ objective, autoContinue: true, sisyphus: focus === "sisyphus" }, ctx, true);
@@ -2358,7 +2361,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				// Nudge only: do not hard-block, but warn in tool response via get_goal execute
 			}
 		}
-		if (checkpointGoalId !== null && !isActionableContinuationGoal(checkpointGoalId) && isMeaningfulProgressToolCall(event.toolName, asRecord(event)?.args)) {
+		if (checkpointGoalId !== null && !isActionableContinuationGoal(checkpointGoalId) && isStaleCheckpointBlockedToolCall(event.toolName)) {
 			turnStoppedFor = checkpointGoalId;
 			return {
 				block: true,

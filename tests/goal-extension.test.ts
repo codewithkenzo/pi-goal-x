@@ -34,6 +34,7 @@ interface GoalSnapshot {
 interface TestContext {
 	cwd: string;
 	hasUI: boolean;
+	sessionManager: { getBranch(): RecordedEntry[] };
 	ui: {
 		notify(message: string, level: string): void;
 		setStatus(key: string, value: string | undefined): void;
@@ -105,11 +106,15 @@ function makeHarness(initial = { idle: true, pendingMessages: false }): Harness 
 		},
 	};
 
-	goalExtension(pi as unknown as Parameters<typeof goalExtension>[0]);
+	const extensionApi: unknown = pi;
+	goalExtension(extensionApi as Parameters<typeof goalExtension>[0]);
 
 	const ctx: TestContext = {
 		cwd,
 		hasUI: false,
+		sessionManager: {
+			getBranch: () => entries,
+		},
 		ui: {
 			notify: () => {},
 			setStatus: () => {},
@@ -243,7 +248,7 @@ test("goal extension queues active auto-continue checkpoint and keeps it actiona
 		assert.equal(typeof before?.systemPrompt, "string");
 		assert.ok(before?.systemPrompt?.includes(`[PI GOAL ACTIVE goalId=${goal.id}]`));
 
-		await emit(harness, "turn_start", {}, harness.ctx);
+		await emit(harness, "turn_start", "", harness.ctx);
 		const toolResult = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean } | undefined;
 		assert.equal(toolResult, undefined);
 	} finally {
@@ -315,7 +320,7 @@ for (const scenario of ["pause", "clear", "replace"] as const) {
 			assert.equal(typeof before?.systemPrompt, "string");
 			assert.ok(before?.systemPrompt?.includes(`[PI GOAL ACTIVE goalId=${goal.id}]`));
 
-			await emit(harness, "turn_start", {}, harness.ctx);
+			await emit(harness, "turn_start", "", harness.ctx);
 
 			if (scenario === "pause") {
 				await runCommand(harness, "goal-pause");
@@ -334,6 +339,14 @@ for (const scenario of ["pause", "clear", "replace"] as const) {
 			assert.equal(stale.details?.currentGoalId, latestGoalSnapshot(harness.entries)?.id ?? null);
 			assert.equal(stale.details?.currentStatus, latestGoalSnapshot(harness.entries)?.status ?? null);
 
+			const blockedQuestion = await emit(harness, "tool_call", { toolName: "goal_question", args: { question: "Should I keep going?" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+			assert.equal(blockedQuestion?.block, true);
+			assert.match(blockedQuestion?.reason ?? "", /goal was already stopped earlier in this turn/);
+			assert.match(blockedQuestion?.reason ?? "", new RegExp(`goalId=${goal.id}`));
+
+			const allowedGetGoal = await emit(harness, "tool_call", { toolName: "get_goal", args: {} }, harness.ctx) as { block?: boolean } | undefined;
+			assert.equal(allowedGetGoal, undefined);
+
 			const blocked = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
 			assert.equal(blocked?.block, true);
 			assert.match(blocked?.reason ?? "", /goal was already stopped earlier in this turn/);
@@ -343,3 +356,45 @@ for (const scenario of ["pause", "clear", "replace"] as const) {
 		}
 	});
 }
+
+test("goal extension stales queued checkpoint after unfocus before turn start", async () => {
+	const harness = makeHarness({ idle: true, pendingMessages: false });
+	try {
+		const goal = await createGoal(harness, "Queued checkpoint unfocus", "sisyphus");
+		const checkpoint = checkpointMessage(goal.id, goal.objective);
+		await sleep(20);
+
+		rmSync(path.join(harness.ctx.cwd, ".pi", "goals"), { recursive: true, force: true });
+		await emit(harness, "session_tree", {}, harness.ctx);
+
+		const contextResult = await emit(harness, "context", { messages: [checkpoint] }) as { messages?: Array<{ content?: unknown; display?: boolean; details?: { kind?: string; goalId?: string; currentGoalId?: string | null; currentStatus?: string | null } }> } | undefined;
+		assert.ok(contextResult && contextResult.messages, "context result missing");
+		const stale = contextResult.messages[0];
+		assert.ok(stale, "stale message missing");
+		assert.equal(stale.display, false);
+		assert.equal(stale.details?.kind, "stale");
+		assert.equal(stale.details?.goalId, goal.id);
+		assert.equal(stale.details?.currentGoalId, null);
+		assert.equal(stale.details?.currentStatus, null);
+		assert.ok(String(stale.content ?? "").startsWith(`[GOAL STALE goalId=${goal.id}]`));
+
+		const before = await emit(harness, "before_agent_start", {
+			prompt: checkpoint.content,
+			systemPrompt: "BASE",
+		}, harness.ctx) as { systemPrompt?: string } | undefined;
+		assert.ok(before?.systemPrompt, "stale checkpoint prompt missing");
+		assert.ok(before?.systemPrompt.includes(`[GOAL STALE goalId=${goal.id}]`));
+		assert.equal(harness.aborted(), true);
+
+		await emit(harness, "turn_start", "", harness.ctx);
+		const blockedQuestion = await emit(harness, "tool_call", { toolName: "goal_question", args: { question: "Should I keep going?" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(blockedQuestion?.block, true);
+		assert.match(blockedQuestion?.reason ?? "", /goal was already stopped earlier in this turn/);
+		assert.match(blockedQuestion?.reason ?? "", new RegExp(`goalId=${goal.id}`));
+
+		const allowedGetGoal = await emit(harness, "tool_call", { toolName: "get_goal", args: {} }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(allowedGetGoal, undefined);
+	} finally {
+		harness.cleanup();
+	}
+});

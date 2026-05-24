@@ -8,6 +8,8 @@ Relevant code in `extensions/goal.ts`:
 - `sendQueuedContinuation(ctx, goalId)` checks active status before sending a follow-up checkpoint.
 - `filter_context` rewrites older checkpoint messages to stale when the queued goal is not current/latest.
 - `tool_call` blocks later tool calls after `turnStoppedFor` is set.
+- `clearGoalTurnRuntimeState()` now clears continuation timer/queue, accounting, runningGoalId, and checkpointGoalId on stop/replace/focus-loss transitions.
+- Stale checkpoint tool blocking should cover full goal work-tool set except `get_goal`.
 
 The reported issue suggests a checkpoint/follow-up can be delivered after stop/replacement and still start a turn before the guard has enough context to prevent first work.
 
@@ -42,6 +44,7 @@ Add/extend tests around `goal.ts` behavior:
 - completed/aborted goal does not deliver queued continuation.
 - replaced goal makes old queued checkpoint stale/non-actionable.
 - stale checkpoint must not cause progress tool calls/subagent starts.
+- mid-turn stale checkpoints must block all work-capable goal tools except safe read-only inspection (`get_goal`).
 
 Run:
 

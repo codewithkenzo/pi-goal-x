@@ -31,4 +31,5 @@ Ensure queued continuations for stopped, paused, completed, aborted, or replaced
 - Stopping or pausing a goal clears pending continuation timer/queue state.
 - Replacing a goal prevents old queued messages from becoming actionable continuations.
 - A queued checkpoint message for a non-active goal is rewritten/staled before it can trigger work.
+- Stale checkpoints block goal work tools/subagent tools from the goal work-tool set before any work starts.
 - Tests cover stopped/paused/replaced stale continuation cases.
