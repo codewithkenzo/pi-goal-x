@@ -364,6 +364,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let continuationScheduledFor: string | null = null;
 	let continuationTimer: ReturnType<typeof setTimeout> | null = null;
 	let runningGoalId: string | null = null;
+	let checkpointGoalId: string | null = null;
 	let terminalInputUnsubscribe: (() => void) | null = null;
 	let statusRefreshTimer: ReturnType<typeof setInterval> | null = null;
 	let statusRefreshCtx: ExtensionContext | null = null;
@@ -532,6 +533,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		clearActiveAccounting();
 	}
 
+	function isActionableContinuationGoal(goalId: string | null | undefined): goalId is string {
+		return !!goalId && state.goal?.id === goalId && state.goal.status === "active" && state.goal.autoContinue;
+	}
 
 	const activeGetGoalTurnsByGoalId = new Map<string, number>();
 
@@ -940,10 +944,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	}
 
 	function sendQueuedContinuation(ctx: ExtensionContext, goalId: string): void {
+		const goal = state.goal;
 		continuationTimer = null;
 		continuationScheduledFor = null;
 		syncGoalTools();
-		if (!state.goal || state.goal.id !== goalId || state.goal.status !== "active" || !state.goal.autoContinue) {
+		if (!goal || !isActionableContinuationGoal(goalId)) {
 			if (continuationQueuedFor === goalId) continuationQueuedFor = null;
 			return;
 		}
@@ -966,13 +971,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		pi.sendMessage<GoalEventDetails>(
 			{
 				customType: GOAL_EVENT_ENTRY,
-				content: continuationPrompt(state.goal),
+				content: continuationPrompt(goal),
 				display: false,
 				details: {
 					kind: "checkpoint",
-					goalId: state.goal.id,
-					status: state.goal.status,
-					objective: state.goal.objective,
+					goalId: goal.id,
+					status: goal.status,
+					objective: goal.objective,
 					timestamp: Date.now(),
 				},
 			},
@@ -983,8 +988,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 	function queueContinuation(ctx: ExtensionContext, force = false): void {
 		if (confirmationIntent !== null || tweakDraftingFor !== null) return;
-		if (!state.goal || state.goal.status !== "active" || !state.goal.autoContinue) return;
-		const goalId = state.goal.id;
+		const goal = state.goal;
+		const goalId = goal?.id;
+		if (!goal || !isActionableContinuationGoal(goalId)) return;
 		if (!force && (continuationQueuedFor === goalId || continuationScheduledFor === goalId)) return;
 		clearContinuationTimer();
 		let delay = CONTINUATION_IDLE_RETRY_MS;
@@ -2300,9 +2306,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const queuedGoalId = goalEventMessageId(candidate);
 			if (!queuedGoalId) return message;
 			if (
-				state.goal?.id === queuedGoalId
-				&& (state.goal.status === "active")
-				&& state.goal.autoContinue
+				isActionableContinuationGoal(queuedGoalId)
 				&& latestGoalEventIndex.get(queuedGoalId) === index
 			) return message;
 			changed = true;
@@ -2353,6 +2357,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				activeGetGoalTurnsByGoalId.set(state.goal.id, prior + 1);
 				// Nudge only: do not hard-block, but warn in tool response via get_goal execute
 			}
+		}
+		if (checkpointGoalId !== null && !isActionableContinuationGoal(checkpointGoalId) && isMeaningfulProgressToolCall(event.toolName, asRecord(event)?.args)) {
+			turnStoppedFor = checkpointGoalId;
+			return {
+				block: true,
+				reason: `The goal was already stopped earlier in this turn (goalId=${checkpointGoalId}). ` +
+					`Do not call more tools; end the turn with a brief summary and yield to the user.`,
+			};
 		}
 		// Track for #4 empty-turn gate.
 		if (isMeaningfulProgressToolCall(event.toolName, asRecord(event)?.args)) {
@@ -2473,6 +2485,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		const incomingGoalId = extractGoalIdFromInjectedMessage(event.prompt ?? "");
 
 		if (confirmationIntent !== null) {
+			checkpointGoalId = null;
 			clearContinuationState();
 			clearActiveAccounting();
 			runningGoalId = null;
@@ -2480,6 +2493,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 
 		if (tweakDraftingFor !== null) {
+			checkpointGoalId = null;
 			clearContinuationState();
 			clearActiveAccounting();
 			runningGoalId = null;
@@ -2490,8 +2504,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		// matches the active goal, abort the whole turn instead of letting the
 		// model act on a stale instruction.
 		if (incomingGoalId !== null) {
+			checkpointGoalId = incomingGoalId;
 			clearContinuationState();
-			if (!state.goal || state.goal.id !== incomingGoalId || (state.goal.status !== "active") || !state.goal.autoContinue) {
+			if (!isActionableContinuationGoal(incomingGoalId)) {
 				try {
 					ctx.abort?.();
 				} catch {}
@@ -2501,6 +2516,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				};
 			}
 		} else {
+			checkpointGoalId = null;
 			// A user-driven turn — clear any queued continuation so we don't
 			// double-fire after the user's own message returns. Also reset the
 			// autoContinue nudge state so the user always gets a fresh chain.

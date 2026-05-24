@@ -1,0 +1,4 @@
+- 2026-05-22: Cloned upstream `tmonk/pi-goal-x`, confirmed `origin/main` at `v0.8.1` does not appear to include this exact stopped-checkpoint guard fix. Created spec and branch `fix/stopped-goal-checkpoint-guard`.
+- 2026-05-24: Added checkpoint-actionability guard in `extensions/goal.ts` so queued continuations only stay live when current goal is still current, active, and autoContinue; stale checkpoint turns now abort before work and block work tools mid-turn after pause/clear/replace.
+- 2026-05-24: Added regression coverage for active auto-continue, paused/cleared/replaced stale checkpoints, and mid-turn work-tool blocking after stop/replacement. Installed deps with `npm install` to run checks.
+- 2026-05-24: Verification green: `npm test` pass, `npm run check` pass.
