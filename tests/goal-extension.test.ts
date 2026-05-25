@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -29,6 +29,7 @@ interface GoalSnapshot {
 	status: "active" | "paused" | "complete";
 	objective: string;
 	autoContinue: boolean;
+	activePath?: string;
 }
 
 interface TestContext {
@@ -173,7 +174,7 @@ function latestGoalSnapshot(entries: RecordedEntry[]): GoalSnapshot | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		if (!entry || entry.customType !== GOAL_STATE_ENTRY) continue;
-		const data = entry.data as { version?: number; goal?: { id?: unknown; status?: unknown; objective?: unknown; autoContinue?: unknown } | null };
+		const data = entry.data as { version?: number; goal?: { id?: unknown; status?: unknown; objective?: unknown; autoContinue?: unknown; activePath?: unknown } | null };
 		const goal = data.goal;
 		if (!goal) return null;
 		if (typeof goal.id !== "string" || typeof goal.objective !== "string" || typeof goal.autoContinue !== "boolean") return null;
@@ -183,6 +184,7 @@ function latestGoalSnapshot(entries: RecordedEntry[]): GoalSnapshot | null {
 			status,
 			objective: goal.objective,
 			autoContinue: goal.autoContinue,
+			activePath: typeof goal.activePath === "string" ? goal.activePath : undefined,
 		};
 	}
 	return null;
@@ -223,6 +225,20 @@ async function createGoal(harness: Harness, objective: string, mode: "goal" | "s
 	return snapshot;
 }
 
+function writePausedGoalFile(harness: Harness, goal: GoalSnapshot): void {
+	assert.ok(goal.activePath, "goal activePath missing");
+	const filePath = path.join(harness.ctx.cwd, goal.activePath);
+	const content = readFileSync(filePath, "utf8");
+	const splitAt = content.indexOf("\n\n# Goal Prompt");
+	assert.ok(splitAt > 0, "goal file metadata split missing");
+	const metadata = JSON.parse(content.slice(0, splitAt)) as Record<string, unknown>;
+	metadata.status = "paused";
+	metadata.autoContinue = false;
+	metadata.stopReason = "agent";
+	metadata.pauseReason = "persisted pause wins over stale memory";
+	writeFileSync(filePath, `${JSON.stringify(metadata, null, 2)}${content.slice(splitAt)}`, "utf8");
+}
+
 test("goal extension queues active auto-continue checkpoint and keeps it actionable", async () => {
 	const harness = makeHarness({ idle: true, pendingMessages: false });
 	try {
@@ -251,6 +267,107 @@ test("goal extension queues active auto-continue checkpoint and keeps it actiona
 		await emit(harness, "turn_start", "", harness.ctx);
 		const toolResult = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean } | undefined;
 		assert.equal(toolResult, undefined);
+	} finally {
+		harness.cleanup();
+	}
+});
+
+test("paused goal on session_start resume does not queue continuation", async () => {
+	const harness = makeHarness({ idle: true, pendingMessages: false });
+	try {
+		await createGoal(harness, "Stay paused on session resume", "sisyphus");
+		await sleep(20);
+		harness.messages.splice(0);
+
+		await runCommand(harness, "goal-pause");
+		await emit(harness, "session_start", { reason: "resume" }, harness.ctx);
+		await sleep(20);
+
+		const current = latestGoalSnapshot(harness.entries);
+		assert.equal(current?.status, "paused");
+		assert.equal(current?.autoContinue, false);
+		assert.equal(harness.messages.length, 0);
+	} finally {
+		harness.cleanup();
+	}
+});
+
+test("paused goal on session_tree does not queue continuation", async () => {
+	const harness = makeHarness({ idle: true, pendingMessages: false });
+	try {
+		await createGoal(harness, "Stay paused on tree restore", "sisyphus");
+		await sleep(20);
+		harness.messages.splice(0);
+
+		await runCommand(harness, "goal-pause");
+		await emit(harness, "session_tree", {}, harness.ctx);
+		await sleep(20);
+
+		const current = latestGoalSnapshot(harness.entries);
+		assert.equal(current?.status, "paused");
+		assert.equal(current?.autoContinue, false);
+		assert.equal(harness.messages.length, 0);
+	} finally {
+		harness.cleanup();
+	}
+});
+
+test("paused checkpoint reconciles from disk and aborts before work starts", async () => {
+	const harness = makeHarness({ idle: true, pendingMessages: false });
+	try {
+		const goal = await createGoal(harness, "Persisted pause beats stale memory", "sisyphus");
+		const checkpoint = checkpointMessage(goal.id, goal.objective);
+		writePausedGoalFile(harness, goal);
+
+		const before = await emit(harness, "before_agent_start", {
+			prompt: checkpoint.content,
+			systemPrompt: "BASE",
+		}, harness.ctx) as { systemPrompt?: string } | undefined;
+		assert.ok(before?.systemPrompt, "stale checkpoint prompt missing");
+		assert.ok(before?.systemPrompt.includes(`[GOAL STALE goalId=${goal.id}]`));
+		assert.equal(harness.aborted(), true);
+
+		const contextResult = await emit(harness, "context", { messages: [checkpoint] }) as { messages?: Array<{ content?: unknown; display?: boolean; details?: { kind?: string; goalId?: string; currentGoalId?: string | null; currentStatus?: string | null } }> } | undefined;
+		assert.ok(contextResult?.messages, "context result missing");
+		const stale = contextResult.messages[0];
+		assert.equal(stale?.display, false);
+		assert.equal(stale?.details?.kind, "stale");
+		assert.equal(stale?.details?.goalId, goal.id);
+		assert.equal(stale?.details?.currentGoalId, goal.id);
+		assert.equal(stale?.details?.currentStatus, "paused");
+
+		await emit(harness, "turn_start", "", harness.ctx);
+		const blockedSubagent = await emit(harness, "tool_call", { toolName: "subagent", args: { task: "delegate stale work" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(blockedSubagent?.block, true);
+		assert.match(blockedSubagent?.reason ?? "", /goal was already stopped earlier in this turn/);
+		const allowedGetGoal = await emit(harness, "tool_call", { toolName: "get_goal", args: {} }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(allowedGetGoal, undefined);
+	} finally {
+		harness.cleanup();
+	}
+});
+
+test("explicit goal-resume returns paused goal to active continuation", async () => {
+	const harness = makeHarness({ idle: true, pendingMessages: false });
+	try {
+		const goal = await createGoal(harness, "Resume only on explicit command", "sisyphus");
+		await sleep(20);
+		harness.messages.splice(0);
+
+		await runCommand(harness, "goal-pause");
+		await runCommand(harness, "goal-resume");
+		await sleep(20);
+
+		const current = latestGoalSnapshot(harness.entries);
+		assert.equal(current?.id, goal.id);
+		assert.equal(current?.status, "active");
+		assert.equal(current?.autoContinue, true);
+		assert.equal(harness.messages.length, 1);
+		const queued = harness.messages[0];
+		assert.equal(queued.message.customType, GOAL_EVENT_ENTRY);
+		assert.equal(queued.options.triggerTurn, true);
+		assert.equal(queued.options.deliverAs, "followUp");
+		assert.match(String(queued.message.content ?? ""), new RegExp(`^<pi_goal_continuation goal_id="${goal.id}"`));
 	} finally {
 		harness.cleanup();
 	}

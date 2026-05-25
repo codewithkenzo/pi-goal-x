@@ -633,9 +633,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		updateUI(ctx);
 	}
 
+	function queueFocusedContinuationIfActionable(ctx: ExtensionContext, force = false): void {
+		if (isActionableContinuationGoal(state.goal?.id)) queueContinuation(ctx, force);
+	}
+
 	function armFocusedContinuation(ctx: ExtensionContext): void {
 		beginAccounting();
-		if (state.goal?.status === "active" && state.goal.autoContinue) queueContinuation(ctx, true);
+		queueFocusedContinuationIfActionable(ctx, true);
 	}
 
 	function removeFocusedGoal(ctx: ExtensionContext, reason: GoalFocusReason): void {
@@ -2445,16 +2449,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (event.reason === "resume" && !state.goal && openGoals().length > 1 && ctx.hasUI) {
 			await focusGoalCommand(ctx);
 		}
-		// Codex behavior: prompt before reactivating a paused goal on resume.
-		if (event.reason === "resume" && state.goal?.status === "paused" && ctx.hasUI) {
-			const current = state.goal;
-			const shouldResume = await ctx.ui.confirm("Resume paused goal?", `Goal: ${current.objective}`);
-			if (shouldResume) {
-				setGoal({ ...current, status: "active", autoContinue: true, stopReason: undefined, pauseReason: undefined, pauseSuggestedAction: undefined }, ctx);
-			}
-		}
 		beginAccounting();
-		queueContinuation(ctx, true);
+		queueFocusedContinuationIfActionable(ctx, true);
 	});
 
 	pi.on("session_before_compact", async (_event, ctx) => {
@@ -2470,14 +2466,14 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (shouldArmPostCompactReminder(state.goal)) {
 			postCompactReminderPending = true;
 		}
-		queueContinuation(ctx, true);
+		queueFocusedContinuationIfActionable(ctx, true);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
 		loadState(ctx);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
-		queueContinuation(ctx, true);
+		queueFocusedContinuationIfActionable(ctx, true);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -2499,6 +2495,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			clearActiveAccounting();
 			runningGoalId = null;
 			return { systemPrompt: currentSystemPrompt() };
+		}
+
+		if (incomingGoalId !== null) {
+			reconcileFocusedGoalFromDisk(ctx);
 		}
 
 		// If this turn was triggered by a hidden goal checkpoint that no longer
