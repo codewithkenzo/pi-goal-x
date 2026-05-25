@@ -337,9 +337,18 @@ test("paused checkpoint reconciles from disk and aborts before work starts", asy
 		assert.equal(stale?.details?.currentStatus, "paused");
 
 		await emit(harness, "turn_start", "", harness.ctx);
+		const blockedBash = await emit(harness, "tool_call", { toolName: "bash", args: { command: "echo BAD" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(blockedBash?.block, true);
+		assert.match(blockedBash?.reason ?? "", /goal was already stopped earlier in this turn/);
+		const blockedQuestion = await emit(harness, "tool_call", { toolName: "goal_question", args: { question: "Should I keep going?" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(blockedQuestion?.block, true);
+		assert.match(blockedQuestion?.reason ?? "", /goal was already stopped earlier in this turn/);
 		const blockedSubagent = await emit(harness, "tool_call", { toolName: "subagent", args: { task: "delegate stale work" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
 		assert.equal(blockedSubagent?.block, true);
 		assert.match(blockedSubagent?.reason ?? "", /goal was already stopped earlier in this turn/);
+		const blockedUnknown = await emit(harness, "tool_call", { toolName: "unknown_extension_tool", args: { payload: "delegate stale work" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(blockedUnknown?.block, true);
+		assert.match(blockedUnknown?.reason ?? "", /goal was already stopped earlier in this turn/);
 		const allowedGetGoal = await emit(harness, "tool_call", { toolName: "get_goal", args: {} }, harness.ctx) as { block?: boolean } | undefined;
 		assert.equal(allowedGetGoal, undefined);
 	} finally {
