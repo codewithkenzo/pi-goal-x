@@ -14,6 +14,8 @@ Likely gap: actionability can be evaluated against stale in-memory state on resu
 
 ## Implementation direction
 
+Runtime invariant: neutral focus/load/resume runtime clears must clear continuation/accounting/running/checkpoint state without marking `turnStoppedFor`. Only true stop/stale/replace/clear lifecycle paths may mark post-stop for same-turn tool blocking. Root cause of resumed active-goal blocks was generic runtime clear deriving `turnStoppedFor` from prior checkpoint/running ids during `/goal-resume`.
+
 1. Add/centralize helper for queueing continuation only when `isActionableContinuationGoal(state.goal?.id)` is true.
 2. In `session_start` and `session_tree`, after `loadState`, do not queue continuations for paused/non-autoContinue goals.
 3. In `before_agent_start`, reconcile focused goal from disk/session before checking incoming checkpoint actionability.

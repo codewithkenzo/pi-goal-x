@@ -528,8 +528,13 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		accounting.lastAccountedAt = null;
 	}
 
-	function clearGoalTurnRuntimeState(): void {
-		turnStoppedFor = turnStoppedFor ?? checkpointGoalId ?? runningGoalId ?? null;
+	function markGoalTurnStopped(goalId: string | null | undefined = checkpointGoalId ?? runningGoalId): void {
+		turnStoppedFor = turnStoppedFor ?? goalId ?? null;
+	}
+
+	function clearGoalTurnRuntimeState(opts: { markStopped?: boolean; stoppedGoalId?: string | null } = {}): void {
+		if (opts.markStopped === true) markGoalTurnStopped(opts.stoppedGoalId);
+		else turnStoppedFor = null;
 		clearContinuationState();
 		clearActiveAccounting();
 		runningGoalId = null;
@@ -922,6 +927,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		// User-initiated pause (Esc / aborted turn). Clear any stale agent pause reason.
 		state.goal = { ...state.goal, autoContinue: false, pauseReason: undefined, pauseSuggestedAction: undefined };
 		stopActiveGoal("paused", "user", ctx);
+		markGoalTurnStopped(pausedGoalId);
 		resetGetGoalNudgeState(pausedGoalId);
 		ctx.ui.notify("Goal paused.", "info");
 	}
@@ -1183,8 +1189,10 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (opts.replace) {
 			const replacementTarget = await chooseOpenGoal(ctx, "Replace which open goal?");
 			if (openGoals().length > 0 && !replacementTarget) return;
+			const replacedGoalId = state.goal?.id ?? checkpointGoalId ?? runningGoalId;
 			archiveCurrentGoal(ctx, "user");
 			setGoal(null, ctx, true, "cleared");
+			markGoalTurnStopped(replacedGoalId);
 		}
 		startGoalDrafting(topic, focus, ctx);
 	}
@@ -1196,10 +1204,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			ctx.ui.notify(`No objective provided. Use ${command} <objective>.`, "warning");
 			return;
 		}
+		const replacedGoalId = state.goal?.id ?? checkpointGoalId ?? runningGoalId;
 		clearGoalTurnRuntimeState();
 		confirmationIntent = null;
 		syncGoalTools();
 		replaceGoal({ objective, autoContinue: true, sisyphus: focus === "sisyphus" }, ctx, true);
+		markGoalTurnStopped(replacedGoalId);
 	}
 
 	async function showGoalStatus(ctx: ExtensionContext): Promise<void> {
@@ -1368,10 +1378,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const selected = await chooseOpenGoal(ctx, "Clear which open goal?");
 			if (!selected) return;
 		}
+		const clearedGoalId = state.goal?.id ?? checkpointGoalId ?? runningGoalId;
 		const archived = archiveCurrentGoal(ctx, "user");
 		const didArchive = !!archived;
 		resetGetGoalNudgeState(state.goal?.id);
 		setGoal(null, ctx, true, "cleared");
+		markGoalTurnStopped(clearedGoalId);
 		// Phase 5 D: also abort any in-flight drafting so the agent's next turn
 		// doesn't try to propose into a cleared slot.
 		const wasDrafting = confirmationIntent !== null;
@@ -1395,10 +1407,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const selected = await chooseOpenGoal(ctx, "Abort which open goal?");
 			if (!selected) return;
 		}
+		const abortedGoalId = state.goal?.id ?? checkpointGoalId ?? runningGoalId;
 		const archived = archiveCurrentGoal(ctx, "user");
 		const didArchive = !!archived;
 		resetGetGoalNudgeState(state.goal?.id);
 		setGoal(null, ctx, true, "aborted");
+		markGoalTurnStopped(abortedGoalId);
 		const wasDrafting = confirmationIntent !== null;
 		confirmationIntent = null;
 		syncGoalTools();

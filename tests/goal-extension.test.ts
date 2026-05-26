@@ -376,7 +376,23 @@ test("explicit goal-resume returns paused goal to active continuation", async ()
 		assert.equal(queued.message.customType, GOAL_EVENT_ENTRY);
 		assert.equal(queued.options.triggerTurn, true);
 		assert.equal(queued.options.deliverAs, "followUp");
-		assert.match(String(queued.message.content ?? ""), new RegExp(`^<pi_goal_continuation goal_id="${goal.id}"`));
+		const queuedPrompt = queued.message.content;
+		if (typeof queuedPrompt !== "string") throw new Error("queued prompt missing");
+		assert.match(queuedPrompt, new RegExp(`^<pi_goal_continuation goal_id="${goal.id}"`));
+
+		const before = await emit(harness, "before_agent_start", {
+			prompt: queuedPrompt,
+			systemPrompt: "BASE",
+		}, harness.ctx) as { systemPrompt?: string } | undefined;
+		assert.equal(typeof before?.systemPrompt, "string");
+		assert.ok(before?.systemPrompt?.includes(`[PI GOAL ACTIVE goalId=${goal.id}]`));
+
+		const toolResultBeforeTurnStart = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(toolResultBeforeTurnStart, undefined);
+
+		await emit(harness, "turn_start", "", harness.ctx);
+		const toolResultAfterTurnStart = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(toolResultAfterTurnStart, undefined);
 	} finally {
 		harness.cleanup();
 	}
