@@ -398,6 +398,48 @@ test("explicit goal-resume returns paused goal to active continuation", async ()
 	}
 });
 
+test("already-running goal-resume clears stale post-stop marker", async () => {
+	const harness = makeHarness({ idle: true, pendingMessages: false });
+	try {
+		await createGoal(harness, "Already-running resume clears stale marker", "sisyphus");
+		await emit(harness, "turn_start", "", harness.ctx);
+
+		const nonProgress = await emit(harness, "tool_call", { toolName: "goal_question", args: { question: "Still active?" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(nonProgress, undefined);
+		const blocked = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(blocked?.block, true);
+		assert.match(blocked?.reason ?? "", /goal was already stopped earlier in this turn/);
+
+		await runCommand(harness, "goal-resume");
+		const allowed = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(allowed, undefined);
+	} finally {
+		harness.cleanup();
+	}
+});
+
+test("post-stop marker from prior agent generation does not block active goal tools", async () => {
+	const harness = makeHarness({ idle: true, pendingMessages: false });
+	try {
+		const goal = await createGoal(harness, "Prior turn marker must self-heal", "sisyphus");
+		await emit(harness, "turn_start", "", harness.ctx);
+		const nonProgress = await emit(harness, "tool_call", { toolName: "goal_question", args: { question: "Set stale marker" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(nonProgress, undefined);
+
+		const before = await emit(harness, "before_agent_start", {
+			prompt: "User resumed normal work",
+			systemPrompt: "BASE",
+		}, harness.ctx) as { systemPrompt?: string } | undefined;
+		assert.equal(typeof before?.systemPrompt, "string");
+		assert.ok(before?.systemPrompt?.includes(`[PI GOAL ACTIVE goalId=${goal.id}]`));
+
+		const allowedFff = await emit(harness, "tool_call", { toolName: "fff_multi_grep", args: { pattern: "turnStoppedFor" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(allowedFff, undefined);
+	} finally {
+		harness.cleanup();
+	}
+});
+
 for (const scenario of [
 	{ name: "pause", stop: async (h: Harness) => runCommand(h, "goal-pause") },
 	{ name: "clear", stop: async (h: Harness) => runCommand(h, "goal-clear") },

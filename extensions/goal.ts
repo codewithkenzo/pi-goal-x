@@ -376,12 +376,15 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	// Per-turn flags reset in turn_start (#4, C9 fix).
 	// goalWorkToolCalledThisTurn: tracks whether a real goal-work tool was called.
 	//   If false at turn_end, we don't queue another autoContinue (empty chat turn).
+	// turnSeq: lightweight generation for hook-order/session resume gaps.
 	// turnStoppedFor: set by pause_goal / update_goal(complete) / apply_goal_tweak
-	//   after their successful execute. Once set, pi.on("tool_call") blocks all
-	//   subsequent in-turn tool calls except POST_STOP_ALLOWED_TOOLS. This is the
-	//   schema fix for "agent keeps writing files after pause_goal".
+	//   after their successful execute. Once set for the current turnSeq,
+	//   pi.on("tool_call") blocks all subsequent in-turn tool calls except
+	//   POST_STOP_ALLOWED_TOOLS. Older markers self-clear so prior turns/sessions
+	//   cannot poison resumed active goals.
 	let goalWorkToolCalledThisTurn = false;
-	let turnStoppedFor: string | null = null;
+	let turnSeq = 0;
+	let turnStoppedFor: { goalId: string; turnSeq: number } | null = null;
 
 	// #5 post-compaction resync: when a compaction just happened, the next agent
 	// turn gets an extra reminder block. Set in session_compact, consumed
@@ -528,8 +531,25 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		accounting.lastAccountedAt = null;
 	}
 
+	function advanceTurnSeq(): void {
+		turnSeq += 1;
+		if (turnStoppedFor?.turnSeq !== turnSeq) turnStoppedFor = null;
+	}
+
+	function currentTurnStoppedGoalId(): string | null {
+		if (!turnStoppedFor) return null;
+		if (turnStoppedFor.turnSeq !== turnSeq) {
+			turnStoppedFor = null;
+			return null;
+		}
+		return turnStoppedFor.goalId;
+	}
+
 	function markGoalTurnStopped(goalId: string | null | undefined = checkpointGoalId ?? runningGoalId): void {
-		turnStoppedFor = turnStoppedFor ?? goalId ?? null;
+		if (turnStoppedFor?.turnSeq !== turnSeq) turnStoppedFor = null;
+		const stoppedGoalId = goalId ?? null;
+		if (!stoppedGoalId) return;
+		turnStoppedFor = turnStoppedFor ?? { goalId: stoppedGoalId, turnSeq };
 	}
 
 	function clearGoalTurnRuntimeState(opts: { markStopped?: boolean; stoppedGoalId?: string | null } = {}): void {
@@ -643,6 +663,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	}
 
 	function armFocusedContinuation(ctx: ExtensionContext): void {
+		if (state.goal?.status === "active") clearGoalTurnRuntimeState();
 		beginAccounting();
 		queueFocusedContinuationIfActionable(ctx, true);
 	}
@@ -1260,7 +1281,9 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		}
 		const resumeGate = validateResumeGoal(state.goal);
 		if (!resumeGate.ok) {
-			const level = resumeGate.message.includes("already running") ? "info" : "warning";
+			const alreadyRunning = resumeGate.message.includes("already running");
+			if (alreadyRunning && state.goal?.status === "active") armFocusedContinuation(ctx);
+			const level = alreadyRunning ? "info" : "warning";
 			ctx.ui.notify(resumeGate.message, level);
 			return;
 		}
@@ -1812,7 +1835,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				};
 				state.goal = writeActiveGoalFile(ctx, state.goal);
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
-				turnStoppedFor = state.goal?.id ?? null;
+				markGoalTurnStopped(state.goal?.id);
 				resetGetGoalNudgeState(state.goal?.id);
 				syncGoalTools();
 				updateUI(ctx);
@@ -1923,7 +1946,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 				};
 				state.goal = writeActiveGoalFile(ctx, state.goal);
 				pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
-				turnStoppedFor = state.goal?.id ?? null;
+				markGoalTurnStopped(state.goal?.id);
 				resetGetGoalNudgeState(state.goal?.id);
 				syncGoalTools();
 				updateUI(ctx);
@@ -2016,7 +2039,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			};
 			state.goal = writeActiveGoalFile(ctx, state.goal);
 			pi.appendEntry(STATE_ENTRY, goalDetails(state.goal));
-			turnStoppedFor = state.goal?.id ?? null;
+			markGoalTurnStopped(state.goal?.id);
 			resetGetGoalNudgeState(state.goal?.id);
 			syncGoalTools();
 			updateUI(ctx);
@@ -2081,7 +2104,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			resetGetGoalNudgeState(next.id);
 			// C9 fix: mark turn-stopped so subsequent in-turn tool calls are blocked.
 			// This is the schema-level closure of "agent kept writing files after pause_goal".
-			turnStoppedFor = state.goal.id;
+			markGoalTurnStopped(state.goal.id);
 
 			const suggestionLine = suggested ? `\nSuggested: ${truncateText(suggested, 160)}` : "";
 			ctx.ui.notify(
@@ -2141,7 +2164,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			const archived = archiveCurrentGoal(ctx, "agent");
 			resetGetGoalNudgeState(abortedGoalId);
 			setGoal(null, ctx, true, "aborted");
-			turnStoppedFor = abortedGoalId;
+			markGoalTurnStopped(abortedGoalId);
 
 			const archiveLine = archived?.archivedPath ? `\nArchive: ${archived.archivedPath}` : "";
 			ctx.ui.notify(
@@ -2277,7 +2300,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			// Reset autoContinue counter — plan changed, agent gets a fresh chain.
 			resetGetGoalNudgeState(state.goal.id);
 			// C9 fix: mark turn-stopped so subsequent in-turn tool calls are blocked.
-			turnStoppedFor = state.goal.id;
+			markGoalTurnStopped(state.goal.id);
 			syncGoalTools();
 			updateUI(ctx);
 			ctx.ui.notify(`Goal tweaked: ${truncateText(changeSummary, 160)}`, "info");
@@ -2348,8 +2371,8 @@ export default function goalExtension(pi: ExtensionAPI): void {
 
 	pi.on("turn_start", async (_event, ctx) => {
 		// Per-turn flag resets (#4 + C9 fix).
+		advanceTurnSeq();
 		goalWorkToolCalledThisTurn = false;
-		turnStoppedFor = null;
 		beginAccounting();
 		updateUI(ctx);
 	});
@@ -2360,10 +2383,11 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		// update_goal=complete / apply_goal_tweak fires in this turn, block all subsequent tool calls except
 		// read-only inspection. Forces the agent to yield the turn instead of "fixing"
 		// the situation by creating extra files etc.
-		if (turnStoppedFor !== null && !POST_STOP_ALLOWED_TOOL_SET.has(event.toolName)) {
+		const stoppedGoalId = currentTurnStoppedGoalId();
+		if (stoppedGoalId !== null && !POST_STOP_ALLOWED_TOOL_SET.has(event.toolName)) {
 			return {
 				block: true,
-				reason: `The goal was already stopped earlier in this turn (goalId=${turnStoppedFor}). ` +
+				reason: `The goal was already stopped earlier in this turn (goalId=${stoppedGoalId}). ` +
 					`Do not call more tools; end the turn with a brief summary and yield to the user.`,
 			};
 		}
@@ -2378,7 +2402,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			}
 		}
 		if (checkpointGoalId !== null && !isActionableContinuationGoal(checkpointGoalId) && isStaleCheckpointBlockedToolCall(event.toolName)) {
-			turnStoppedFor = checkpointGoalId;
+			markGoalTurnStopped(checkpointGoalId);
 			return {
 				block: true,
 				reason: `The goal was already stopped earlier in this turn (goalId=${checkpointGoalId}). ` +
@@ -2391,7 +2415,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			goalWorkToolCalledThisTurn = true;
 		} else if (state.goal?.status === "active" && state.goal.autoContinue && event.toolName !== "get_goal") {
 			// A non-progress tool should not create an infinite retry chain.
-			turnStoppedFor = state.goal.id;
+			markGoalTurnStopped(state.goal.id);
 		}
 		return;
 	});
@@ -2458,6 +2482,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (event, ctx) => {
+		advanceTurnSeq();
 		loadState(ctx);
 		syncTerminalInputPause(ctx);
 		if (event.reason === "resume" && !state.goal && openGoals().length > 1 && ctx.hasUI) {
@@ -2484,6 +2509,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
+		advanceTurnSeq();
 		loadState(ctx);
 		syncTerminalInputPause(ctx);
 		beginAccounting();
@@ -2491,6 +2517,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		advanceTurnSeq();
 		syncGoalTools();
 		const currentSystemPrompt = () => ctx.getSystemPrompt?.() || event.systemPrompt;
 		const incomingGoalId = extractGoalIdFromInjectedMessage(event.prompt ?? "");
