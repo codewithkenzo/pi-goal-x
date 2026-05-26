@@ -398,21 +398,26 @@ test("explicit goal-resume returns paused goal to active continuation", async ()
 	}
 });
 
-test("already-running goal-resume clears stale post-stop marker", async () => {
+test("active checkpoint prep tools do not poison same turn", async () => {
 	const harness = makeHarness({ idle: true, pendingMessages: false });
 	try {
-		await createGoal(harness, "Already-running resume clears stale marker", "sisyphus");
+		const goal = await createGoal(harness, "Prep tools must not stop active checkpoint", "sisyphus");
+		const checkpoint = checkpointMessage(goal.id, goal.objective);
+
+		const before = await emit(harness, "before_agent_start", {
+			prompt: checkpoint.content,
+			systemPrompt: "BASE",
+		}, harness.ctx) as { systemPrompt?: string } | undefined;
+		assert.equal(typeof before?.systemPrompt, "string");
+		assert.ok(before?.systemPrompt?.includes(`[PI GOAL ACTIVE goalId=${goal.id}]`));
+
 		await emit(harness, "turn_start", "", harness.ctx);
-
-		const nonProgress = await emit(harness, "tool_call", { toolName: "goal_question", args: { question: "Still active?" } }, harness.ctx) as { block?: boolean } | undefined;
-		assert.equal(nonProgress, undefined);
-		const blocked = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean; reason?: string } | undefined;
-		assert.equal(blocked?.block, true);
-		assert.match(blocked?.reason ?? "", /goal was already stopped earlier in this turn/);
-
-		await runCommand(harness, "goal-resume");
-		const allowed = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean } | undefined;
-		assert.equal(allowed, undefined);
+		const recall = await emit(harness, "tool_call", { toolName: "session_recall", args: { query: "active goal" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(recall, undefined);
+		const grep = await emit(harness, "tool_call", { toolName: "fff_multi_grep", args: { pattern: "turnStoppedFor" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(grep, undefined);
+		const read = await emit(harness, "tool_call", { toolName: "read", args: { path: "README.md" } }, harness.ctx) as { block?: boolean } | undefined;
+		assert.equal(read, undefined);
 	} finally {
 		harness.cleanup();
 	}
@@ -421,10 +426,11 @@ test("already-running goal-resume clears stale post-stop marker", async () => {
 test("post-stop marker from prior agent generation does not block active goal tools", async () => {
 	const harness = makeHarness({ idle: true, pendingMessages: false });
 	try {
-		const goal = await createGoal(harness, "Prior turn marker must self-heal", "sisyphus");
-		await emit(harness, "turn_start", "", harness.ctx);
-		const nonProgress = await emit(harness, "tool_call", { toolName: "goal_question", args: { question: "Set stale marker" } }, harness.ctx) as { block?: boolean } | undefined;
-		assert.equal(nonProgress, undefined);
+		const oldGoal = await createGoal(harness, "Prior turn marker must self-heal", "sisyphus");
+		await runCommand(harness, "sisyphus-set", "Replacement active goal after stop marker");
+		const goal = latestGoalSnapshot(harness.entries);
+		assert.ok(goal, "replacement goal missing");
+		assert.notEqual(goal.id, oldGoal.id);
 
 		const before = await emit(harness, "before_agent_start", {
 			prompt: "User resumed normal work",

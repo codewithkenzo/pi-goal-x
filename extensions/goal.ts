@@ -2413,9 +2413,6 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (isMeaningfulProgressToolCall(event.toolName, asRecord(event)?.args)) {
 			if (state.goal?.id) activeGetGoalTurnsByGoalId.delete(state.goal.id);
 			goalWorkToolCalledThisTurn = true;
-		} else if (state.goal?.status === "active" && state.goal.autoContinue && event.toolName !== "get_goal") {
-			// A non-progress tool should not create an infinite retry chain.
-			markGoalTurnStopped(state.goal.id);
 		}
 		return;
 	});
